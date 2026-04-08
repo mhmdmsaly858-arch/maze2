@@ -34,22 +34,6 @@ DELTA = {
     WEST: (-1, 0),
 }
 
-# 3×5 pixel fonts for digits '4' and '2'
-_DIGIT_4 = [
-    [1, 0, 1],
-    [1, 0, 1],
-    [1, 1, 1],
-    [0, 0, 1],
-    [0, 0, 1],
-]
-_DIGIT_2 = [
-    [1, 1, 1],
-    [0, 0, 1],
-    [1, 1, 1],
-    [1, 0, 0],
-    [1, 1, 1],
-]
-
 
 class MazeGenerator:
     """Generates a 2-D maze using iterative DFS (recursive backtracker).
@@ -99,7 +83,9 @@ class MazeGenerator:
         self.solution: list[tuple[int, int]] = []
         self.pattern42: set[tuple[int, int]] = set()
         self._rng = random.Random(seed)
-
+        w = self.width // 2
+        h = self.height // 2
+        self.num_42 = [(w - 1, h),(w - 1, h - 1), (w - 2, h), (w - 3, h), (w - 3, h - 1),(w - 3, h - 2),(w - 1, h - 2),(w - 1, h + 1), (w + 1, h), (w + 2, h), (w + 3, h), (w + 1, h + 2), (w + 2, h + 2), (w + 3, h + 2),(w + 1, h - 2), (w + 2, h - 2), (w + 3, h - 2), (w + 3, h - 1), (w + 1, h + 1), (w - 1, h + 2)]
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -116,12 +102,14 @@ class MazeGenerator:
                      two cells). If False add ~5 % extra passages for loops.
         """
         self._init_grid()
+        # self._init_grid()
         self._carve_passages_dfs()
+        self.maze[(self.width, self.height)] = 15
         if not perfect:
             self._add_loops()
-        self._enforce_outer_walls()
+        # self._enforce_outer_walls()
         self.solution = self._bfs_solution()
-        self.pattern42 = self._compute_42_cells()
+
 
     def solution_as_directions(self) -> str:
         """Return the solution as a string of N/E/S/W characters."""
@@ -154,10 +142,6 @@ class MazeGenerator:
             rows.append(row)
         return rows
 
-    def has_42_pattern(self) -> bool:
-        """Return True if the maze is large enough to show the '42' pattern."""
-        return self.width >= 11 and self.height >= 9
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -176,15 +160,19 @@ class MazeGenerator:
     def _remove_wall(self, x: int, y: int, direction: int) -> None:
         """Remove the wall between (x,y) and its neighbour in direction."""
         nx, ny = x + DELTA[direction][0], y + DELTA[direction][1]
-        self.maze[(x, y)] &= ~direction
-        self.maze[(nx, ny)] &= ~OPPOSITE[direction]
+        self.maze[(x, y)] -= direction
+        self.maze[(nx, ny)] -= OPPOSITE[direction]
 
     def _carve_passages_dfs(self) -> None:
         """Iterative DFS to carve a spanning tree (perfect maze)."""
         visited: set[tuple[int, int]] = set()
         stack: list[tuple[int, int]] = [self.entry]
         visited.add(self.entry)
+        w = self.width // 2
+        h = self.height // 2
 
+        for x, y in self.num_42:
+            visited.add((x , y))
         while stack:
             x, y = stack[-1]
             neighbors = [
@@ -209,35 +197,13 @@ class MazeGenerator:
             for y in range(self.height)
             for x in range(self.width)
             for d, (dx, dy) in DELTA.items()
-            if self._in_bounds(x + dx, y + dy) and (self.maze[(x, y)] & d)
+            if self._in_bounds(x + dx, y + dy) and (self.maze[(x, y)] & d) and (x, y) not in self.num_42 and (x + dx, y + dy) not in self.num_42
         ]
         self._rng.shuffle(candidates)
         for x, y, direction in candidates[:extra]:
             self._remove_wall(x, y, direction)
 
-    def _enforce_outer_walls(self) -> None:
-        """Close every border wall, then open entry and exit outer walls."""
-        for x in range(self.width):
-            self.maze[(x, 0)] |= NORTH
-            self.maze[(x, self.height - 1)] |= SOUTH
-        for y in range(self.height):
-            self.maze[(0, y)] |= WEST
-            self.maze[(self.width - 1, y)] |= EAST
 
-        # Open the outer wall of entry and exit
-        self._open_outer_wall(*self.entry)
-        self._open_outer_wall(*self.exit)
-
-    def _open_outer_wall(self, x: int, y: int) -> None:
-        """Open whichever border wall faces outside for cell (x,y)."""
-        if y == 0:
-            self.maze[(x, y)] &= ~NORTH
-        if y == self.height - 1:
-            self.maze[(x, y)] &= ~SOUTH
-        if x == 0:
-            self.maze[(x, y)] &= ~WEST
-        if x == self.width - 1:
-            self.maze[(x, y)] &= ~EAST
 
     def _bfs_solution(self) -> list[tuple[int, int]]:
         """Return the shortest path from entry to exit using BFS."""
@@ -252,53 +218,16 @@ class MazeGenerator:
             for direction, (dx, dy) in DELTA.items():
                 nx, ny = cx + dx, cy + dy
                 if (
-                    self._in_bounds(nx, ny)
-                    and (nx, ny) not in prev
+                    (nx, ny) not in prev
                     and not (self.maze[(cx, cy)] & direction)
                 ):
                     prev[(nx, ny)] = (cx, cy)
                     queue.append((nx, ny))
-
         # Reconstruct path
-        path: list[tuple[int, int]] = []
+        self.path: list[tuple[int, int]] = []
         node: Optional[tuple[int, int]] = end
         while node is not None:
-            path.append(node)
+            self.path.append(node)
             node = prev.get(node)
-        path.reverse()
-        return path if path and path[0] == start else []
-
-    # ------------------------------------------------------------------
-    # '42' pattern (visual only — does NOT modify maze walls)
-    # ------------------------------------------------------------------
-
-    def _compute_42_cells(self) -> set[tuple[int, int]]:
-        """Return the set of cells that visually form the '42' pattern.
-
-        The pattern is centred in the maze. It is purely decorative: the
-        actual wall data is unchanged so connectivity is always preserved.
-        The cells are rendered with a distinct colour by the display layer.
-        """
-        if not self.has_42_pattern():
-            return set()
-
-        pattern_w = 7   # 3 cols + 1 gap + 3 cols
-        pattern_h = 5
-        ox = (self.width - pattern_w) // 2
-        oy = (self.height - pattern_h) // 2
-
-        cells: set[tuple[int, int]] = set()
-        for row_i, row in enumerate(_DIGIT_4):
-            for col_i, filled in enumerate(row):
-                if filled:
-                    cx, cy = ox + col_i, oy + row_i
-                    if self._in_bounds(cx, cy):
-                        cells.add((cx, cy))
-
-        for row_i, row in enumerate(_DIGIT_2):
-            for col_i, filled in enumerate(row):
-                if filled:
-                    cx, cy = ox + 4 + col_i, oy + row_i
-                    if self._in_bounds(cx, cy):
-                        cells.add((cx, cy))
-        return cells
+        # path.reverse()
+        return self.path
