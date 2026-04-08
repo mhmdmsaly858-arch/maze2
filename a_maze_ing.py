@@ -9,6 +9,7 @@ Usage:
 import sys
 import os
 from typing import Optional
+import time
  
 from mazegen import MazeGenerator, NORTH, EAST, SOUTH, WEST
  
@@ -27,8 +28,8 @@ ENTRY_COLOUR = "\033[95m"   # magenta
 EXIT_COLOUR = "\033[91m"    # bright red
 COLOUR_42 = "\033[94m"      # blue for '42' cells
  
-WALL_CH = "█"
-OPEN_CH = " "
+WALL_CH = "██"
+OPEN_CH = "  "
  
  
 # ── Config parsing ─────────────────────────────────────────────────────────────
@@ -48,7 +49,7 @@ def parse_config(path: str) -> dict[str, str]:
     """
     required = {"WIDTH", "HEIGHT", "ENTRY", "EXIT", "OUTPUT_FILE", "PERFECT"}
     cfg: dict[str, str] = {}
- 
+
     try:
         with open(path, "r") as fh:
             for lineno, line in enumerate(fh, 1):
@@ -63,22 +64,22 @@ def parse_config(path: str) -> dict[str, str]:
                 cfg[key.strip()] = value.strip()
     except FileNotFoundError:
         raise FileNotFoundError(f"Config file not found: {path!r}")
- 
+
     missing = required - cfg.keys()
     if missing:
         raise ValueError(
             f"Missing required config keys: {', '.join(sorted(missing))}"
         )
     return cfg
- 
- 
+
+
 def parse_coord(raw: str, label: str) -> tuple[int, int]:
     """Parse an 'x,y' string into a tuple of ints.
  
     Args:
         raw:   The raw string from the config (e.g. '0,0').
         label: Human-readable name used in error messages.
- 
+
     Returns:
         Tuple (x, y).
  
@@ -94,8 +95,8 @@ def parse_coord(raw: str, label: str) -> tuple[int, int]:
         raise ValueError(
             f"{label}: coordinates must be integers, got {raw!r}"
         )
- 
- 
+
+
 # ── Output file ───────────────────────────────────────────────────────────────
  
 def write_output(gen: MazeGenerator, output_path: str) -> None:
@@ -124,8 +125,7 @@ def write_output(gen: MazeGenerator, output_path: str) -> None:
 def render_terminal(
     gen: MazeGenerator,
     show_path: bool = False,
-    colour_idx: int = 0,
-    show_42: bool = False,
+    colour_idx: int = 0
 ) -> None:
     """Render the maze to the terminal using block characters.
  
@@ -139,81 +139,90 @@ def render_terminal(
         gen:        Generated maze.
         show_path:  Whether to highlight the solution path.
         colour_idx: Index into WALL_COLOURS.
-        show_42:    Whether to colour '42' pattern cells distinctly.
+        :    Whether to colour '42' pattern cells distinctly.
     """
     w, h = gen.width, gen.height
     path_set = set(gen.solution) if show_path else set()
     wall_col = WALL_COLOURS[colour_idx % len(WALL_COLOURS)]
- 
-    lines: list[str] = []
- 
+
+    line = [[(wall_col + WALL_CH + RESET) for b in range(2 * w + 1)] for a in range(2 * h + 1)]
+
     for row in range(2 * h + 1):
-        line = ""
+
         for col in range(2 * w + 1):
- 
             on_h_edge = (row % 2 == 0)   # horizontal grid line
             on_v_edge = (col % 2 == 0)   # vertical grid line
- 
+
             # Cell coordinates (only valid when row/col are odd)
             cx = col // 2
             cy = row // 2
- 
+    
             if on_h_edge and on_v_edge:
                 # ── Corner pillar ──────────────────────────────────────────
-                line += wall_col + WALL_CH + RESET
- 
+               line[row][col] = wall_col + WALL_CH + RESET
+
             elif on_h_edge:
                 # ── Horizontal wall between cell (cx, cy-1) and (cx, cy) ──
                 # This segment is drawn at grid row `row` (even).
                 # The cell above is (cx, cy-1); we check its SOUTH wall.
                 cell_above_y = (row // 2) - 1
-                if cell_above_y < 0 or cx >= w:
+                if cell_above_y < 0:
                     # Top outer border → always wall
-                    line += wall_col + WALL_CH + RESET
-                elif cell_above_y >= h:
+                    line[row][col] = wall_col + WALL_CH + RESET
+                elif cell_above_y == h:
                     # Bottom outer border → always wall
-                    line += wall_col + WALL_CH + RESET
+                    line[row][col] = wall_col + WALL_CH + RESET
                 else:
                     wall_closed = bool(gen.maze[(cx, cell_above_y)] & SOUTH)
                     if wall_closed:
-                        line += wall_col + WALL_CH + RESET
+                        line[row][col] = wall_col + WALL_CH + RESET
                     else:
-                        line += OPEN_CH
- 
+                        line[row][col] = OPEN_CH
+
             elif on_v_edge:
                 # ── Vertical wall between cell (cx-1, cy) and (cx, cy) ────
                 cell_left_x = (col // 2) - 1
-                if cell_left_x < 0 or cy >= h:
+                if cell_left_x < 0:
                     # Left outer border → always wall
-                    line += wall_col + WALL_CH + RESET
-                elif cell_left_x >= w:
+                    line[row][col] = wall_col + WALL_CH + RESET
+                elif cell_left_x == w:
                     # Right outer border → always wall
-                    line += wall_col + WALL_CH + RESET
+                    line[row][col] = wall_col + WALL_CH + RESET
                 else:
                     wall_closed = bool(gen.maze[(cell_left_x, cy)] & EAST)
                     if wall_closed:
-                        line += wall_col + WALL_CH + RESET
+                        line[row][col] = wall_col + WALL_CH + RESET
                     else:
-                        line += OPEN_CH
- 
+                        line[row][col] = OPEN_CH
+
             else:
                 # ── Cell interior ──────────────────────────────────────────
                 cell = (cx, cy)
-                if cell == gen.entry:
-                    line += ENTRY_COLOUR + "E" + RESET
+                if cell in gen.num_42:
+                    line[row][col] = wall_col + WALL_CH + RESET
+                elif cell == gen.entry:
+                    line[row][col] = ENTRY_COLOUR + "🟢" + RESET
                 elif cell == gen.exit:
-                    line += EXIT_COLOUR + "X" + RESET
-                elif show_path and cell in path_set:
-                    line += PATH_COLOUR + "█" + RESET
-                elif show_42 and cell in gen.pattern42:
-                    line += COLOUR_42 + WALL_CH + RESET
+                    line[row][col] = EXIT_COLOUR + "🔴" + RESET
+
                 else:
-                    line += OPEN_CH
- 
-        lines.append(line)
- 
-    os.system("clear")
-    print("\n".join(lines))
+                    line[row][col] = OPEN_CH
+        # time.sleep(0.1)
+            if not show_path:
+                os.system("clear")
+                for l in line:
+                    print("".join(l))
+                time.sleep(0.0005)
+
+        if show_path:
+            for i in range(len(gen.path)):
+                x, y = gen.path[i]
+                line[y * 2 + 1][x * 2 + 1] = PATH_COLOUR + "██" + RESET
+                if (x, y) != gen.path[0]:
+                    os.system("clear")
+                    for l in line:
+                        print("".join(l))
+                    time.sleep(0.05)
  
  
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -253,50 +262,40 @@ def interactive_loop(gen: MazeGenerator, cfg: dict[str, str]) -> None:
     """
     show_path = False
     colour_idx = 0
-    show_42 = False
+
  
-    render_terminal(gen, show_path, colour_idx, show_42)
+    render_terminal(gen, show_path, colour_idx)
  
     while True:
         print("\n==== A-Maze-ing ====")
         print("1. Re-generate a new maze")
         print("2. Show/Hide solution path")
         print("3. Rotate wall colour")
-        print("4. Toggle '42' highlight")
-        print("5. Quit")
-        choice = input("Choice (1-5): ").strip()
+        print("4. Quit")
+        choice = input("Choice (1-4): ").strip()
  
         if choice == "1":
             try:
                 gen = build_generator(cfg, seed=None)
-                if not gen.has_42_pattern():
-                    print(
-                        "Warning: maze too small to show the '42' pattern.",
-                        file=sys.stderr,
-                    )
                 show_path = False
-                render_terminal(gen, show_path, colour_idx, show_42)
+                render_terminal(gen, show_path, colour_idx, )
             except ValueError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
  
         elif choice == "2":
             show_path = not show_path
-            render_terminal(gen, show_path, colour_idx, show_42)
+            render_terminal(gen, show_path, colour_idx, )
  
         elif choice == "3":
             colour_idx = (colour_idx + 1) % len(WALL_COLOURS)
-            render_terminal(gen, show_path, colour_idx, show_42)
+            render_terminal(gen, show_path, colour_idx, )
  
         elif choice == "4":
-            show_42 = not show_42
-            render_terminal(gen, show_path, colour_idx, show_42)
- 
-        elif choice == "5":
             print("Goodbye!")
             break
  
         else:
-            print("Invalid choice, please enter 1-5.")
+            print("Invalid choice, please enter 1-4.")
  
  
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -325,12 +324,6 @@ def main() -> None:
     except ValueError as exc:
         print(f"Maze generation error: {exc}", file=sys.stderr)
         sys.exit(1)
- 
-    if not gen.has_42_pattern():
-        print(
-            "Warning: maze dimensions too small to show the '42' pattern.",
-            file=sys.stderr,
-        )
  
     output_file = cfg["OUTPUT_FILE"]
     try:
