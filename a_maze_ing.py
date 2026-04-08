@@ -214,15 +214,29 @@ def render_terminal(
                     print("".join(l))
                 time.sleep(0.0005)
 
-        if show_path:
-            for i in range(len(gen.path)):
-                x, y = gen.path[i]
-                line[y * 2 + 1][x * 2 + 1] = PATH_COLOUR + "██" + RESET
-                if (x, y) != gen.path[0]:
-                    os.system("clear")
-                    for l in line:
-                        print("".join(l))
-                    time.sleep(0.05)
+    if show_path:
+        for i in range(len(gen.path)):
+            x, y = gen.path[i]
+            a = y * 2 + 1
+            b = x * 2 + 1
+            if (x, y) not in [gen.entry , gen.exit]:
+                a = y * 2 + 1
+                b = x * 2 + 1
+                line[a][b] = PATH_COLOUR + "██" + RESET
+                os.system("clear")
+                for l in line:
+                    print("".join(l))
+                time.sleep(0.05)
+            if (x, y) not in [gen.exit]:
+                x1, y1 = gen.path[i + 1]
+                r = (a + (y1 * 2 + 1)) // 2
+                c = (b + (x1 * 2 + 1)) // 2
+                line[r][c] = PATH_COLOUR + "██" + RESET
+                os.system("clear")
+                for l in line:
+                    print("".join(l))
+                time.sleep(0.05)
+            
  
  
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -336,5 +350,8 @@ def main() -> None:
     interactive_loop(gen, cfg)
  
  
+if __name__ == "__main__":
+    main()
+
 if __name__ == "__main__":
     main()
