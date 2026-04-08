@@ -229,5 +229,5 @@ class MazeGenerator:
         while node is not None:
             self.path.append(node)
             node = prev.get(node)
-        # path.reverse()
+        self.path.reverse()
         return self.path
