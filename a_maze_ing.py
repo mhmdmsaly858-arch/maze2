@@ -1,357 +1,247 @@
+"""
+mazegen - A reusable maze generation module.
 
+Usage example::
+
+    from mazegen import MazeGenerator
+
+    gen = MazeGenerator(width=20, height=15, seed=42)
+    gen.generate(perfect=True)
+
+    maze = gen.maze          # dict[(x,y)] -> int (bitmask: N=1,E=2,S=4,W=8)
+    path = gen.solution      # list of (x,y) tuples from entry to exit
+    entry = gen.entry        # (x, y)
+    exit_ = gen.exit         # (x, y)
+    pattern = gen.pattern42  # set of (x,y) cells that form the '42'
 """
-a_maze_ing.py - Main entry point for the A-Maze-ing project.
- 
-Usage:
-    python3 a_maze_ing.py config.txt
-"""
- 
-import sys
-import os
+
+import random
+from collections import deque
 from typing import Optional
-import time
- 
-from mazegen import MazeGenerator, NORTH, EAST, SOUTH, WEST
- 
-# ── ANSI colours ──────────────────────────────────────────────────────────────
-RESET = "\033[0m"
-WALL_COLOURS = [
-    "\033[37m",   # white  (default)
-    "\033[33m",   # yellow
-    "\033[32m",   # green
-    "\033[36m",   # cyan
-    "\033[35m",   # magenta
-    "\033[31m",   # red
-]
-PATH_COLOUR = "\033[96m"    # bright cyan
-ENTRY_COLOUR = "\033[95m"   # magenta
-EXIT_COLOUR = "\033[91m"    # bright red
-COLOUR_42 = "\033[94m"      # blue for '42' cells
- 
-WALL_CH = "██"
-OPEN_CH = "  "
- 
- 
-# ── Config parsing ─────────────────────────────────────────────────────────────
- 
-def parse_config(path: str) -> dict[str, str]:
-    """Parse KEY=VALUE config file, ignoring comment lines starting with #.
- 
+
+# Wall bitmasks
+NORTH = 1
+EAST = 2
+SOUTH = 4
+WEST = 8
+
+OPPOSITE = {NORTH: SOUTH, SOUTH: NORTH, EAST: WEST, WEST: EAST}
+DELTA = {
+    NORTH: (0, -1),
+    SOUTH: (0, 1),
+    EAST: (1, 0),
+    WEST: (-1, 0),
+}
+
+
+class MazeGenerator:
+    """Generates a 2-D maze using iterative DFS (recursive backtracker).
+
+    Each cell is stored as a bitmask where a bit set to 1 means the wall
+    in that direction is *closed* (present):
+
+    - Bit 0 (value 1): North
+    - Bit 1 (value 2): East
+    - Bit 2 (value 4): South
+    - Bit 3 (value 8): West
+
     Args:
-        path: Path to the configuration file.
- 
-    Returns:
-        Dictionary of key->value string pairs.
- 
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: On bad syntax or missing required keys.
+        width:  Number of cells horizontally. Must be >= 3.
+        height: Number of cells vertically.   Must be >= 3.
+        seed:   Optional RNG seed for reproducibility.
+        entry:  (x, y) of the entrance cell. Defaults to (0, 0).
+        exit_:  (x, y) of the exit cell. Defaults to (width-1, height-1).
     """
-    required = {"WIDTH", "HEIGHT", "ENTRY", "EXIT", "OUTPUT_FILE", "PERFECT"}
-    cfg: dict[str, str] = {}
 
-    try:
-        with open(path, "r") as fh:
-            for lineno, line in enumerate(fh, 1):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    raise ValueError(
-                        f"Config line {lineno}: expected KEY=VALUE, got: {line!r}"
-                    )
-                key, _, value = line.partition("=")
-                cfg[key.strip()] = value.strip()
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Config file not found: {path!r}")
-
-    missing = required - cfg.keys()
-    if missing:
-        raise ValueError(
-            f"Missing required config keys: {', '.join(sorted(missing))}"
+    def __init__(
+        self,
+        width: int = 20,
+        height: int = 15,
+        seed: Optional[int] = None,
+        entry: tuple[int, int] = (0, 0),
+        exit_: Optional[tuple[int, int]] = None,
+    ) -> None:
+        """Initialise the generator without running generation yet."""
+        if width < 3 or height < 3:
+            raise ValueError("width and height must be >= 3")
+        self.width = width
+        self.height = height
+        self.seed = seed
+        self.entry: tuple[int, int] = entry
+        self.exit: tuple[int, int] = (
+            exit_ if exit_ is not None else (width - 1, height - 1)
         )
-    return cfg
+        w = self.width // 2
+        h = self.height // 2
+        self.num_42 = []
+        if self.width > 8 and self.height > 6:
+            self.num_42 = [
+                (w - 1, h),
+                (w - 2, h),
+                (w - 3, h),
+                (w - 3, h - 1),
+                (w - 3, h - 2),
+                (w - 1, h + 1),
+                (w + 1, h),
+                (w + 2, h),
+                (w + 3, h),
+                (w + 1, h + 2),
+                (w + 2, h + 2),
+                (w + 3, h + 2),
+                (w + 1, h - 2),
+                (w + 2, h - 2),
+                (w + 3, h - 2),
+                (w + 3, h - 1),
+                (w + 1, h + 1),
+                (w - 1, h + 2),
+            ]
+        if not self._in_bounds(*self.entry):
+            raise ValueError(f"entry {self.entry} is out of bounds")
+        if not self._in_bounds(*self.exit):
+            raise ValueError(f"exit {self.exit} is out of bounds")
+        if self.entry == self.exit:
+            raise ValueError("entry and exit must be different cells")
+        if self.entry in self.num_42 or self.exit in self.num_42:
+            raise ValueError("ENTRY and EXIT must be outside 42!")
+        self.maze: dict[tuple[int, int], int] = {}
+        self.solution: list[tuple[int, int]] = []
+        self.pattern42: set[tuple[int, int]] = set()
+        self._rng = random.Random(seed)
 
+    def generate(self, perfect: bool = True) -> None:
+        """Generate the maze.
 
-def parse_coord(raw: str, label: str) -> tuple[int, int]:
-    """Parse an 'x,y' string into a tuple of ints.
- 
-    Args:
-        raw:   The raw string from the config (e.g. '0,0').
-        label: Human-readable name used in error messages.
+        The '42' pattern is stored in ``self.pattern42`` as a set of cell
+        coordinates. These cells are visually distinct but remain part of
+        the navigable maze so connectivity is preserved.
 
-    Returns:
-        Tuple (x, y).
- 
-    Raises:
-        ValueError: If the format is wrong or values are not integers.
-    """
-    parts = raw.split(",")
-    if len(parts) != 2:
-        raise ValueError(f"{label}: expected 'x,y', got {raw!r}")
-    try:
-        return int(parts[0].strip()), int(parts[1].strip())
-    except ValueError:
-        raise ValueError(
-            f"{label}: coordinates must be integers, got {raw!r}"
-        )
+        Args:
+            perfect: If True produce a perfect maze (unique path between any
+                     two cells). If False add ~5 % extra passages for loops.
+        """
+        self._init_grid()
+        self._carve_passages_dfs()
+        if not perfect:
+            self._add_loops()
 
+        self.solution = self._bfs_solution()
 
-# ── Output file ───────────────────────────────────────────────────────────────
- 
-def write_output(gen: MazeGenerator, output_path: str) -> None:
-    """Write the maze to a file in hex format with entry, exit and path.
- 
-    Args:
-        gen:         Fully generated MazeGenerator.
-        output_path: Destination file path.
-    """
-    rows = gen.to_hex_grid()
-    ex, ey = gen.entry
-    xx, xy = gen.exit
-    direction_str = gen.solution_as_directions()
- 
-    with open(output_path, "w") as fh:
-        for row in rows:
-            fh.write(row + "\n")
-        fh.write("\n")
-        fh.write(f"{ex},{ey}\n")
-        fh.write(f"{xx},{xy}\n")
-        fh.write(direction_str + "\n")
- 
- 
-# ── Terminal renderer ─────────────────────────────────────────────────────────
- 
-def render_terminal(
-    gen: MazeGenerator,
-    show_path: bool = False,
-    colour_idx: int = 0
-) -> None:
-    """Render the maze to the terminal using block characters.
- 
-    The maze is drawn on a (2*H+1) x (2*W+1) character grid:
-    - Even row + even col  → corner pillar (always wall)
-    - Even row + odd  col  → horizontal wall segment (top/bottom of cell)
-    - Odd  row + even col  → vertical   wall segment (left/right of cell)
-    - Odd  row + odd  col  → cell interior
- 
-    Args:
-        gen:        Generated maze.
-        show_path:  Whether to highlight the solution path.
-        colour_idx: Index into WALL_COLOURS.
-        :    Whether to colour '42' pattern cells distinctly.
-    """
-    w, h = gen.width, gen.height
-    path_set = set(gen.solution) if show_path else set()
-    wall_col = WALL_COLOURS[colour_idx % len(WALL_COLOURS)]
-
-    line = [[(wall_col + WALL_CH + RESET) for b in range(2 * w + 1)] for a in range(2 * h + 1)]
-
-    for row in range(2 * h + 1):
-
-        for col in range(2 * w + 1):
-            on_h_edge = (row % 2 == 0)   # horizontal grid line
-            on_v_edge = (col % 2 == 0)   # vertical grid line
-
-            # Cell coordinates (only valid when row/col are odd)
-            cx = col // 2
-            cy = row // 2
-    
-            if on_h_edge and on_v_edge:
-                # ── Corner pillar ──────────────────────────────────────────
-               line[row][col] = wall_col + WALL_CH + RESET
-
-            elif on_h_edge:
-                # ── Horizontal wall between cell (cx, cy-1) and (cx, cy) ──
-                # This segment is drawn at grid row `row` (even).
-                # The cell above is (cx, cy-1); we check its SOUTH wall.
-                cell_above_y = (row // 2) - 1
-                if cell_above_y < 0:
-                    # Top outer border → always wall
-                    line[row][col] = wall_col + WALL_CH + RESET
-                elif cell_above_y == h:
-                    # Bottom outer border → always wall
-                    line[row][col] = wall_col + WALL_CH + RESET
-                else:
-                    wall_closed = bool(gen.maze[(cx, cell_above_y)] & SOUTH)
-                    if wall_closed:
-                        line[row][col] = wall_col + WALL_CH + RESET
-                    else:
-                        line[row][col] = OPEN_CH
-
-            elif on_v_edge:
-                # ── Vertical wall between cell (cx-1, cy) and (cx, cy) ────
-                cell_left_x = (col // 2) - 1
-                if cell_left_x < 0:
-                    # Left outer border → always wall
-                    line[row][col] = wall_col + WALL_CH + RESET
-                elif cell_left_x == w:
-                    # Right outer border → always wall
-                    line[row][col] = wall_col + WALL_CH + RESET
-                else:
-                    wall_closed = bool(gen.maze[(cell_left_x, cy)] & EAST)
-                    if wall_closed:
-                        line[row][col] = wall_col + WALL_CH + RESET
-                    else:
-                        line[row][col] = OPEN_CH
-
+    def solution_as_directions(self) -> str:
+        """Return the solution as a string of N/E/S/W characters."""
+        if len(self.solution) < 2:
+            return ""
+        dirs: list[str] = []
+        for (x1, y1), (x2, y2) in zip(self.solution, self.solution[1:]):
+            dx, dy = x2 - x1, y2 - y1
+            if dx == 1:
+                dirs.append("E")
+            elif dx == -1:
+                dirs.append("W")
+            elif dy == -1:
+                dirs.append("N")
             else:
-                # ── Cell interior ──────────────────────────────────────────
-                cell = (cx, cy)
-                if cell in gen.num_42:
-                    line[row][col] = wall_col + WALL_CH + RESET
-                elif cell == gen.entry:
-                    line[row][col] = ENTRY_COLOUR + "🟢" + RESET
-                elif cell == gen.exit:
-                    line[row][col] = EXIT_COLOUR + "🔴" + RESET
+                dirs.append("S")
+        return "".join(dirs)
 
-                else:
-                    line[row][col] = OPEN_CH
-        # time.sleep(0.1)
-            if not show_path:
-                os.system("clear")
-                for l in line:
-                    print("".join(l))
-                time.sleep(0.0005)
+    def to_hex_grid(self) -> list[str]:
+        """Return the maze as a list of hex strings, one per row.
 
-    if show_path:
-        for i in range(len(gen.path)):
-            x, y = gen.path[i]
-            a = y * 2 + 1
-            b = x * 2 + 1
-            if (x, y) not in [gen.entry , gen.exit]:
-                a = y * 2 + 1
-                b = x * 2 + 1
-                line[a][b] = PATH_COLOUR + "██" + RESET
-                os.system("clear")
-                for l in line:
-                    print("".join(l))
-                time.sleep(0.05)
-            if (x, y) not in [gen.exit]:
-                x1, y1 = gen.path[i + 1]
-                r = (a + (y1 * 2 + 1)) // 2
-                c = (b + (x1 * 2 + 1)) // 2
-                line[r][c] = PATH_COLOUR + "██" + RESET
-                os.system("clear")
-                for l in line:
-                    print("".join(l))
-                time.sleep(0.05)
-            
- 
- 
-# ── Helpers ───────────────────────────────────────────────────────────────────
- 
-def build_generator(cfg: dict[str, str], seed: Optional[int]) -> MazeGenerator:
-    """Instantiate and generate a maze from a config dict.
- 
-    Args:
-        cfg:  Parsed configuration dictionary.
-        seed: RNG seed (None for a random maze).
- 
-    Returns:
-        A fully generated MazeGenerator.
-    """
-    width = int(cfg["WIDTH"])
-    height = int(cfg["HEIGHT"])
-    entry = parse_coord(cfg["ENTRY"], "ENTRY")
-    exit_ = parse_coord(cfg["EXIT"], "EXIT")
-    perfect = cfg["PERFECT"].strip().lower() in ("true", "1", "yes")
- 
-    gen = MazeGenerator(
-        width=width, height=height, seed=seed,
-        entry=entry, exit_=exit_
-    )
-    gen.generate(perfect=perfect)
-    return gen
- 
- 
-# ── Interactive menu ──────────────────────────────────────────────────────────
- 
-def interactive_loop(gen: MazeGenerator, cfg: dict[str, str]) -> None:
-    """Run the interactive terminal menu.
- 
-    Args:
-        gen: Initial generated maze to display.
-        cfg: Parsed configuration dict for re-generation.
-    """
-    show_path = False
-    colour_idx = 0
+        Each character is one hex digit: N=bit0, E=bit1, S=bit2, W=bit3.
+        A set bit means the wall is closed (present).
+        """
+        rows: list[str] = []
+        for y in range(self.height):
+            row = ""
+            for x in range(self.width):
+                row += format(self.maze[(x, y)], "X")
+            rows.append(row)
+        return rows
 
- 
-    render_terminal(gen, show_path, colour_idx)
- 
-    while True:
-        print("\n==== A-Maze-ing ====")
-        print("1. Re-generate a new maze")
-        print("2. Show/Hide solution path")
-        print("3. Rotate wall colour")
-        print("4. Quit")
-        choice = input("Choice (1-4): ").strip()
- 
-        if choice == "1":
-            try:
-                gen = build_generator(cfg, seed=None)
-                show_path = False
-                render_terminal(gen, show_path, colour_idx, )
-            except ValueError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
- 
-        elif choice == "2":
-            show_path = not show_path
-            render_terminal(gen, show_path, colour_idx, )
- 
-        elif choice == "3":
-            colour_idx = (colour_idx + 1) % len(WALL_COLOURS)
-            render_terminal(gen, show_path, colour_idx, )
- 
-        elif choice == "4":
-            print("Goodbye!")
-            break
- 
-        else:
-            print("Invalid choice, please enter 1-4.")
- 
- 
-# ── Main ──────────────────────────────────────────────────────────────────────
- 
-def main() -> None:
-    """Entry point: parse config, generate maze, write output, show visual."""
-    if len(sys.argv) != 2:
-        print("Usage: python3 a_maze_ing.py config.txt", file=sys.stderr)
-        sys.exit(1)
- 
-    config_path = sys.argv[1]
- 
-    try:
-        cfg = parse_config(config_path)
-        seed: Optional[int] = (
-            int(cfg["SEED"]) if "SEED" in cfg else None
-        )
-        if int(cfg["WIDTH"]) < 3 or int(cfg["HEIGHT"]) < 3:
-            raise ValueError("WIDTH and HEIGHT must both be >= 3")
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
- 
-    try:
-        gen = build_generator(cfg, seed)
-    except ValueError as exc:
-        print(f"Maze generation error: {exc}", file=sys.stderr)
-        sys.exit(1)
- 
-    output_file = cfg["OUTPUT_FILE"]
-    try:
-        write_output(gen, output_file)
-        print(f"Maze written to {output_file!r}")
-    except OSError as exc:
-        print(f"Error writing output file: {exc}", file=sys.stderr)
-        sys.exit(1)
- 
-    interactive_loop(gen, cfg)
- 
- 
-if __name__ == "__main__":
-    main()
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-if __name__ == "__main__":
-    main()
+    def _in_bounds(self, x: int, y: int) -> bool:
+        return 0 <= x < self.width and 0 <= y < self.height
+
+    def _init_grid(self) -> None:
+        """Fill every cell with all 4 walls closed."""
+        self.maze = {
+            (x, y): NORTH | EAST | SOUTH | WEST
+            for y in range(self.height)
+            for x in range(self.width)
+        }
+
+    def _remove_wall(self, x: int, y: int, direction: int) -> None:
+        """Remove the wall between (x,y) and its neighbour in direction."""
+        nx, ny = x + DELTA[direction][0], y + DELTA[direction][1]
+        self.maze[(x, y)] -= direction
+        self.maze[(nx, ny)] -= OPPOSITE[direction]
+
+    def _carve_passages_dfs(self) -> None:
+        """Iterative DFS to carve a spanning tree (perfect maze)."""
+        visited: set[tuple[int, int]] = set()
+        stack: list[tuple[int, int]] = [self.entry]
+        visited.add(self.entry)
+        if len(self.num_42):
+            for x, y in self.num_42:
+                visited.add((x, y))
+        while stack:
+            x, y = stack[-1]
+            neighbors = [
+                (d, x + dx, y + dy)
+                for d, (dx, dy) in DELTA.items()
+                if self._in_bounds(x + dx, y + dy)
+                and (x + dx, y + dy) not in visited
+            ]
+            if neighbors:
+                direction, nx, ny = self._rng.choice(neighbors)
+                self._remove_wall(x, y, direction)
+                visited.add((nx, ny))
+                stack.append((nx, ny))
+            else:
+                stack.pop()
+
+    def _add_loops(self) -> None:
+        """Remove ~5 % of interior walls to create light loops."""
+        extra = max(1, (self.width * self.height) // 20)
+        candidates = [
+            (x, y, d)
+            for y in range(self.height)
+            for x in range(self.width)
+            for d, (dx, dy) in DELTA.items()
+            if 0 <= x + dx < self.width and 0 <= y + dy < self.height
+            and (self.maze[(x, y)] & d)
+            and (x, y) not in self.num_42
+            and (x + dx, y + dy) not in self.num_42
+        ]
+        self._rng.shuffle(candidates)
+        for x, y, direction in candidates[:extra]:
+            if (self.maze[(x, y)] & direction):
+                self._remove_wall(x, y, direction)
+
+    def _bfs_solution(self) -> list[tuple[int, int]]:
+        """Return the shortest path from entry to exit using BFS."""
+        start, end = self.entry, self.exit
+        queue: deque[tuple[int, int]] = deque([start])
+        prev: dict[tuple[int, int], Optional[tuple[int, int]]] = {start: None}
+
+        while queue:
+            cx, cy = queue.popleft()
+            if (cx, cy) == end:
+                break
+            for direction, (dx, dy) in DELTA.items():
+                nx, ny = cx + dx, cy + dy
+                if self._in_bounds(nx, ny) and (nx, ny) not in prev and not (
+                    self.maze[(cx, cy)] & direction
+                ):
+                    prev[(nx, ny)] = (cx, cy)
+                    queue.append((nx, ny))
+        # Reconstruct path
+        self.path: list[tuple[int, int]] = []
+        node: Optional[tuple[int, int]] = end
+        while node is not None:
+            self.path.append(node)
+            node = prev.get(node)
+        self.path.reverse()
+        return self.path
